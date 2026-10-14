@@ -401,6 +401,14 @@
   const customerLines = (cu) => (cu.type === 'company' ? [{ t: cu.company || cu.name, bold: true }, { t: cu.company && cu.name ? 'Attn: ' + personName(cu.name) : '' }] : cu.type === 'individual' ? [{ t: personName(cu.name), bold: true }] : [{ t: personName(cu.name), bold: true }, { t: cu.company }]).concat([ { t: cu.address, muted: true, addr: true }, { t: cu.phone && 'Tel: ' + cu.phone, muted: true }, { t: cu.email, muted: true }]);
   const logoOf = async (s) => (s.document.showLogo ? imgInfo(s.company.logo) : null);
 
+  // Saved PDF name: "<document no.> <full customer/company name>.pdf". The document number itself is unchanged.
+  // Starts with the document code (QT / INV / RC / WR) unless the number already begins with it.
+  function fileName(number, name, code) {
+    const clean = (v) => String(v || '').replace(/[\\/:*?"<>|\u0000-\u001F]+/g, ' ').replace(/\s+/g, ' ').trim();
+    let n = clean(number) || 'Document'; const c = clean(name).slice(0, 120).replace(/[. ]+$/, '');
+    if (code && !new RegExp('^' + code + '(?![A-Za-z])', 'i').test(n)) n = code + ' ' + n;
+    return (c ? n + ' ' + c : n) + '.pdf';
+  }
   async function quotationPdf(q, sp) {
     need(q && String(q.number || '').trim(), 'quotation number is missing.'); need(q.customer && ZW.custName(q.customer), 'customer name is missing.'); need((q.items || []).length, 'the quotation has no job scope.');
     const s = ZW.settingsService.get(), c = s.company, B = makeDoc({ sp }), f = ZW.fmt, t = ZW.calcTotals(q);
@@ -426,7 +434,7 @@
     ]);
     if (String(s.quotation.footer || '').trim()) B.para(s.quotation.footer, { size: 8, color: MUTED, style: 'italic' });
     B.finish(c, 'Quotation ' + q.number);
-    return { doc: B.doc, filename: 'Quotation_' + q.number + '.pdf' };
+    return { doc: B.doc, filename: fileName(q.number, ZW.custName(q.customer), 'QT') };
   }
 
   async function invoicePdf(inv, sp) {
@@ -465,7 +473,7 @@
     await B.signatures(c, [{ label: 'Authorised by', name: personName(c.authorizedPerson), sub: c.authorizedTitle, org: 'For ' + c.name, useSig: true }]);
     B.para('This is a computer-generated invoice.', { size: 7.5, color: MUTED });
     B.finish(c, 'Invoice ' + inv.number);
-    return { doc: B.doc, filename: 'Invoice_' + inv.number + '.pdf' };
+    return { doc: B.doc, filename: fileName(inv.number, ZW.custName(inv.customer), 'INV') };
   }
 
   async function receiptPdf(r, sp) {
@@ -487,7 +495,7 @@
     await B.signatures(c, [{ label: 'Received by', name: personName(c.authorizedPerson), sub: c.authorizedTitle, org: 'For ' + c.name, useSig: true }, { label: '', stamp: true }]);
     if (String(s.receipt.footer || '').trim()) B.para(s.receipt.footer, { size: 7.8, color: MUTED, style: 'italic' });
     B.finish(c, 'Receipt ' + r.number);
-    return { doc: B.doc, filename: 'Receipt_' + r.number + '.pdf' };
+    return { doc: B.doc, filename: fileName(r.number, nameOrCompany(r.customer.name, typeOf(r) === 'company'), 'RC') };
   }
 
   async function warrantyPdf(w, sp) {
@@ -513,7 +521,7 @@
     if (String(s.warranty.closing || '').trim()) { B.st.y += 2; B.para(ZW.util.fill(s.warranty.closing, ctx), { size: 9, color: BODY }); }
     await B.signatures(c, [{ label: 'Yours faithfully,', name: personName(c.authorizedPerson), sub: c.authorizedTitle, org: 'For ' + c.name, useSig: true }, { label: '', stamp: true, blankIfNone: true }], ...(() => { const saved = w.id && ZW.warrantyService.get(w.id); const src = saved ? saved : { stamp: c.stamp, stampX: c.stampX, stampY: c.stampY, stampSize: c.stampSize }; return [src.stamp || '', { dx: src.stampX, dy: src.stampY, scale: src.stampSize }]; })());
     B.finish(c, 'Warranty ' + w.number);
-    return { doc: B.doc, filename: 'Warranty_' + w.number + '.pdf' };
+    return { doc: B.doc, filename: fileName(w.number, nameOrCompany(w.customerName, typeOf(w) === 'company'), 'WR') };
   }
 
   const builders = { quotation: quotationPdf, invoice: invoicePdf, receipt: receiptPdf, warranty: warrantyPdf };
@@ -526,7 +534,7 @@
       const { doc, filename } = best;
       const pdfs = kind === 'quotation' ? (rec.pdfAttachments || []).filter((x) => x && x.data) : [];
       const blob = pdfs.length ? await appendPdfs(doc.output('arraybuffer'), pdfs) : doc.output('blob');
-      return { blob, filename: filename.replace(/[^\w.\-]+/g, '_') };
+      return { blob, filename };
     },
     async preview(kind, rec) { const out = await this.build(kind, rec); if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = URL.createObjectURL(out.blob); return { url: lastUrl, filename: out.filename, blob: out.blob }; },
     async download(kind, rec, prebuilt) {
