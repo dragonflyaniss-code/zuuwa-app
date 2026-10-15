@@ -10,12 +10,40 @@
   const PDFLIB = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
   const ensureMerge = () => { if (window.PDFLib) return Promise.resolve(); if (!mergeP) mergeP = loadScript(PDFLIB).catch(() => { mergeP = null; throw new ZW.AppError('Could not load the PDF merge engine. Please check your internet connection and try again.'); }); return mergeP; };
   const dataToBytes = (u) => { const b = atob(String(u).split(',')[1] || ''); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; };
+  const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+  let pdfjsP = null;
+  const ensurePdfJs = () => {
+    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+    if (!pdfjsP) pdfjsP = loadScript(PDFJS + 'pdf.min.js').then(() => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js'; return window.pdfjsLib; }).catch((e) => { pdfjsP = null; throw e; });
+    return pdfjsP;
+  };
+  async function appendRendered(out, bytes) {
+    const L = await ensurePdfJs(); const d = await L.getDocument({ data: bytes }).promise;
+    for (let i = 1; i <= d.numPages; i++) {
+      const p = await d.getPage(i); const base = p.getViewport({ scale: 1 });
+      const scale = Math.min(2.2, 2400 / Math.max(base.width, base.height)); const vp = p.getViewport({ scale });
+      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await p.render({ canvasContext: ctx, viewport: vp }).promise;
+      const jpg = await new Promise((res) => c.toBlob((b) => res(b), 'image/jpeg', 0.88));
+      const img = await out.embedJpg(new Uint8Array(await jpg.arrayBuffer()));
+      const pg = out.addPage([base.width, base.height]); pg.drawImage(img, { x: 0, y: 0, width: base.width, height: base.height });
+      c.width = c.height = 0; p.cleanup();
+    }
+    await d.destroy();
+  }
   async function appendPdfs(mainBytes, list) {
     await ensureMerge(); const { PDFDocument } = window.PDFLib;
     const out = await PDFDocument.load(mainBytes);
     for (const f of list) {
-      try { const src = await PDFDocument.load(dataToBytes(f.data), { ignoreEncryption: true }); const pages = await out.copyPages(src, src.getPageIndices()); pages.forEach((pg) => out.addPage(pg)); }
-      catch (e) { throw new ZW.AppError('Could not read the attached PDF "' + (f.name || f.title || 'attachment') + '". It may be damaged or password-protected.'); }
+      const label = f.name || f.title || 'attachment'; let src;
+      try { src = await PDFDocument.load(dataToBytes(f.data), { ignoreEncryption: true }); }
+      catch (e) { throw new ZW.AppError('Could not read the attached PDF "' + label + '". It may be damaged or password-protected.'); }
+      if (!src.isEncrypted) { const pages = await out.copyPages(src, src.getPageIndices()); pages.forEach((pg) => out.addPage(pg)); continue; }
+      // Secured PDFs (e.g. SIRIM reports with an owner password) cannot be copied page-for-page — the copied pages come out blank.
+      // They are drawn page by page at print quality instead, keeping each page's original size and orientation.
+      try { await appendRendered(out, dataToBytes(f.data)); }
+      catch (e) { throw new ZW.AppError('Could not add the secured PDF "' + label + '". Please try a copy without security restrictions.'); }
     }
     return new Blob([await out.save()], { type: 'application/pdf' });
   }
@@ -182,17 +210,22 @@
     };
     const itemsTable = (lines, topt) => {
       topt = topt || {}; const BUL = !!topt.bullets; const DF = BUL ? 8.4 : 8.1, BI = 3.4;
-      const DESC_W = CW - (9 + 15 + 13 + 25 + 28), PV = 1.1 + 0.5 * SP;
       const body = lines.map((l, i) => { const lump = l.pricing === 'lump'; const hasQ = String(l.qty == null ? '' : l.qty).trim() !== '' && ZW.util.num(l.qty) > 0; return [String(i + 1), '', lump ? (hasQ ? ZW.fmt.qty(l.qty) : '1') : ZW.fmt.qty(l.qty), lump ? (hasQ ? (l.unit || '') : 'Lot') : (l.unit || ''), lump ? 'Lump Sum' : money(l.rate), money(l.amount)]; });
+      // Qty column widens to fit the longest quantity on one line (min 15 mm); the description column gives up the difference.
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.6); const qMax = body.reduce((m, r) => Math.max(m, doc.getTextWidth(String(r[2] || ''))), 0);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(BUL ? 8.8 : 7.2); const qHead = doc.getTextWidth('Qty');
+      const QW = Math.min(36, Math.max(15, Math.ceil((Math.max(qMax, qHead) + 4.6) * 10) / 10));
+      const DESC_W = CW - (9 + QW + 13 + 25 + 28), PV = 1.1 + 0.5 * SP;
       doc.autoTable({
         startY: st.y, margin: { left: M, right: M, top: TOP, bottom: H - BOTTOM }, theme: 'plain',
         head: [['No.', 'Description of Works', 'Qty', 'Unit', 'Rate (' + cur() + ')', 'Amount (' + cur() + ')']], body,
         styles: { font: 'helvetica', fontSize: 8.6, textColor: INK, cellPadding: { top: PV, right: 2, bottom: PV, left: 2 }, valign: 'top', overflow: 'linebreak', lineWidth: 0 },
         headStyles: BUL ? { fontStyle: 'bold', fontSize: 8.8, textColor: INK, valign: 'middle', cellPadding: { top: 2, right: 2, bottom: 2, left: 2 } } : { fontStyle: 'bold', fontSize: 7.2, textColor: MUTED },
-        columnStyles: { 0: { cellWidth: 9 }, 1: { cellWidth: DESC_W }, 2: { cellWidth: 15, halign: 'right' }, 3: { cellWidth: 13 }, 4: { cellWidth: 25, halign: 'right' }, 5: { cellWidth: 28, halign: 'right', fontStyle: 'bold' } },
+        columnStyles: { 0: { cellWidth: 9 }, 1: { cellWidth: DESC_W }, 2: { cellWidth: QW, halign: 'center' }, 3: { cellWidth: 13, halign: 'center' }, 4: { cellWidth: 25, halign: 'right' }, 5: { cellWidth: 28, halign: 'right', fontStyle: 'bold' } },
         rowPageBreak: 'avoid', showHead: 'everyPage',
         didParseCell: (d) => {
-          if (d.section === 'head' && [2, 4, 5].indexOf(d.column.index) >= 0) d.cell.styles.halign = 'right';
+          if (d.section === 'head' && [2, 3].indexOf(d.column.index) >= 0) d.cell.styles.halign = 'center';
+          if (d.section === 'head' && [4, 5].indexOf(d.column.index) >= 0) d.cell.styles.halign = 'right';
           if (d.section === 'body' && d.column.index === 1) {
             const it = lines[d.row.index];
             doc.setFont('helvetica', 'bold'); doc.setFontSize(8.6); const n = doc.splitTextToSize(it.name || '-', DESC_W - 4);
@@ -304,7 +337,16 @@
         if (s.title != null) {
           setF(8.8, 'bold', INK); doc.text((i + 1) + '.', M, st.y + 3.3);
           const tl = doc.splitTextToSize(s.title || '', CW - 7); doc.text(tl, M + 7, st.y + 3.3, o.tight ? { lineHeightFactor: 1.35 } : undefined); st.y += o.tight ? tl.length * lh(8.8, 1.35) : tl.length * lh(8.8, 1.3) + 0.8 * SP;
-          para(s.body, o.tight ? { size: 8.3, indent: 7, color: BODY, k: 1.35, after: 1.41 } : { size: 8.3, indent: 7, color: BODY, after: 1.4 });
+          if (Array.isArray(s.bullets) && s.bullets.length) {
+            // Bulleted body: "•" at the text indent, wrapped lines hang under the text.
+            if (String(s.intro || '').trim()) para(s.intro, o.tight ? { size: 8.3, indent: 7, color: BODY, k: 1.35, after: 0.3 } : { size: 8.3, indent: 7, color: BODY, after: 0.3 });
+            s.bullets.forEach((b, bi) => {
+              const k = o.tight ? 1.35 : 1.3, L = lh(8.3, k); if (ensure(L)) {} setF(8.3, 'normal', BODY);
+              doc.text('•', M + 7.4, st.y + L * 0.72);
+              const last = bi === s.bullets.length - 1;
+              para(b, o.tight ? { size: 8.3, indent: 10.6, color: BODY, k: 1.35, after: last ? 1.41 : 0.3 } : { size: 8.3, indent: 10.6, color: BODY, after: last ? 1.4 : 0.3 });
+            });
+          } else para(s.body, o.tight ? { size: 8.3, indent: 7, color: BODY, k: 1.35, after: 1.41 } : { size: 8.3, indent: 7, color: BODY, after: 1.4 });
         } else {
           setF(8.4, 'normal', BODY); doc.text((i + 1) + '.', M, st.y + 3.1); para(s.body, o.tight ? { size: 8.4, indent: 7, color: BODY, k: 1.35, after: 1.41 } : { size: 8.4, indent: 7, color: BODY, after: 1.2 });
         }
@@ -322,7 +364,7 @@
       });
       st.y += 2 * SP;
     };
-    const attachments = async (atts, pdfList) => {
+    const attachments = async (atts, pdfList, src) => {
       const valid = []; for (const a of atts || []) { const info = await imgInfo(a.image); if (info) valid.push({ ...info, title: a.title }); }
       label('Attachments', { need: valid.length ? 90 : 18 });
       const pl = (pdfList || []).filter((x) => x && x.data);
@@ -330,7 +372,7 @@
       const gap = 6, cw = (CW - gap) / 2, boxH = Math.round(58 * (0.55 + 0.45 * SP));
       for (let i = 0; i < valid.length; i += 2) {
         const pair = valid.slice(i, i + 2); setF(8.3, 'bold', INK);
-        const caps = pair.map((p, j) => doc.splitTextToSize('Fig. ' + (i + j + 1) + '   ' + (String(p.title || '').trim() || 'Untitled'), cw));
+        const caps = pair.map((p, j) => doc.splitTextToSize('Fig. ' + (i + j + 1) + '   ' + (String(p.title || '').trim() || (ZW.autoCaption && src ? ZW.autoCaption(src) : 'Untitled')), cw));
         const capH = Math.max(...caps.map((c) => c.length)) * lh(8.3, 1.3) + 1.5;
         ensure(boxH + capH + 3); st.y += SP;
         pair.forEach((p, j) => {
@@ -427,12 +469,13 @@
       const w = ZW.quotationService.warrantyEntries(q);
       return { title: 'Warranty', body: w.length ? w.map((e) => e.title + ' — ' + e.period).join('\n') : sec.body };
     }), { tight: true });
-    await B.attachments(q.attachments, q.pdfAttachments);
     await B.signatures(c, [
       { label: 'Prepared by', name: personName(c.authorizedPerson), sub: c.authorizedTitle, org: 'For ' + c.name, useSig: true },
       { label: 'Accepted by (Customer)', name: 'Name:', sub: 'Company stamp (if applicable):', org: 'Date:' },
     ]);
     if (String(s.quotation.footer || '').trim()) B.para(s.quotation.footer, { size: 8, color: MUTED, style: 'italic' });
+    // Attachments (photos + list of enclosed PDFs) come after the signature section; attached PDF files are still appended after that.
+    await B.attachments(q.attachments, q.pdfAttachments, q);
     B.finish(c, 'Quotation ' + q.number);
     return { doc: B.doc, filename: fileName(q.number, ZW.custName(q.customer), 'QT') };
   }

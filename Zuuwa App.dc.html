@@ -22,9 +22,9 @@
 <script src="_ds/modernist-12054ede-624e-4c9d-9934-b03897fd36f5/_ds_bundle.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="app/config.js?v=1790685222395"></script>
-<script src="app/services.js?v=1790747925196"></script>
+<script src="app/services.js?v=1792067185037"></script>
 <script src="app/report.js?v=1790761636845"></script>
-<script src="app/pdf.js?v=1791979556097"></script>
+<script src="app/pdf.js?v=1792067185037"></script>
 <style>
 :root{--color-bg:#f4f8fa;--color-surface:#ffffff;--color-text:#1b2329;--color-accent:#006994;--color-accent-2:#006994;--color-divider:color-mix(in srgb,#1b2329 26%,transparent);
 --color-neutral-100:#f2f5f7;--color-neutral-200:#e6ebee;--color-neutral-300:#d2d9de;--color-neutral-400:#b3bcc3;--color-neutral-500:#8d979f;--color-neutral-600:#6c767e;--color-neutral-700:#535c63;--color-neutral-800:#3b4247;--color-neutral-900:#262c30;
@@ -940,6 +940,7 @@ select.input{appearance:auto}
           <div style="background:var(--color-surface);padding:10px;display:grid;gap:8px">
             <div role="img" aria-label="{{ a.title }}" style="aspect-ratio:4/3;background-color:var(--color-neutral-200);background-repeat:no-repeat;background-position:center;background-size:contain;background-image:{{ a.bg }}"></div>
             <input class="input" placeholder="Attachment title, e.g. Existing Leakage Condition" data-path="attachments.{{ $index }}.title" value="{{ a.title }}" onChange="{{ onDraft }}">
+            <button class="btn btn-ghost" type="button" style="justify-self:start;font-size:12.5px;min-height:36px;height:auto" title="Replace the title with a suggestion based on the job scope" data-i="{{ $index }}" onClick="{{ autoCap }}">Auto title</button>
             <div style="display:flex;gap:2px;align-items:center"><span style="font-size:12px;color:var(--color-neutral-700);margin-right:auto">Fig. {{ a.no }}</span>
               <button class="btn btn-ghost btn-icon" type="button" title="Move earlier" data-idx="{{ $index }}" data-dir="-1" onClick="{{ moveAttach }}" disabled="{{ a.isFirst }}">{{ ic.up }}</button>
               <button class="btn btn-ghost btn-icon" type="button" title="Move later" data-idx="{{ $index }}" data-dir="1" onClick="{{ moveAttach }}" disabled="{{ a.isLast }}">{{ ic.down }}</button>
@@ -1122,7 +1123,7 @@ select.input{appearance:auto}
         <textarea class="input" style="min-height:52px" data-path="paymentTerms.{{ $index }}.wording" value="{{ p.wording }}" onChange="{{ onSet }}"></textarea>
       </div>
     </sc-for>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border-top:2px solid var(--color-divider);padding-top:16px;margin-top:8px"><div><h2 style="margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Terms &amp; conditions</h2><div style="font-size:12.5px;color:var(--color-neutral-700);margin-top:4px">Printed after the auto-generated Payment Terms and Warranty sections.</div></div><button class="btn btn-secondary" type="button" data-list="quotation.terms" onClick="{{ setAdd }}">{{ ic.plus }}<span>Add section</span></button></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border-top:2px solid var(--color-divider);padding-top:16px;margin-top:8px"><div><h2 style="margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Terms &amp; conditions</h2><div style="font-size:12.5px;color:var(--color-neutral-700);margin-top:4px">Payment Terms and Warranty are added automatically under “Confirmation &amp; Payment”. To print a bullet point, start the line with “- ” (e.g. - Clear access to the work area).</div></div><button class="btn btn-secondary" type="button" data-list="quotation.terms" onClick="{{ setAdd }}">{{ ic.plus }}<span>Add section</span></button></div>
     <sc-for list="{{ st.qTerms }}" as="t" hint-placeholder-count="0">
       <div style="background:var(--color-surface);padding:14px;display:grid;gap:8px">
         <div style="display:flex;gap:6px;align-items:center"><input class="input" style="font-weight:700;flex:1" placeholder="Section title" data-path="quotation.terms.{{ $index }}.title" value="{{ t.title }}" onChange="{{ onSet }}"><button class="btn btn-ghost btn-icon" type="button" data-list="quotation.terms" data-idx="{{ $index }}" data-dir="-1" onClick="{{ setMove }}" disabled="{{ t.isFirst }}">{{ ic.up }}</button><button class="btn btn-ghost btn-icon" type="button" data-list="quotation.terms" data-idx="{{ $index }}" data-dir="1" onClick="{{ setMove }}" disabled="{{ t.isLast }}">{{ ic.down }}</button><button class="btn btn-ghost btn-icon" type="button" data-list="quotation.terms" data-idx="{{ $index }}" onClick="{{ setRemove }}">{{ ic.trash }}</button></div>
@@ -1980,11 +1981,12 @@ class Component extends DCLogic {
     const files = Array.from(e.target.files || []); e.target.value = ''; if (!files.length) return;
     this.setState({ busy: 'Processing images…' });
     for (const f of files) {
-      try { const img = await this.Z.imageService.compress(f, { max: 1400, quality: 0.78 }); const title = String(f.name || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/^(IMG|DSC|PXL|Screenshot)\s*\d*.*$/i, '').trim(); this.setState((s) => ({ draft: { ...s.draft, attachments: [...(s.draft.attachments || []), { id: this.Z.util.uid('att'), title, image: img }] } })); }
+      try { const img = await this.Z.imageService.compress(f, { max: 1400, quality: 0.78 }); const fromFile = String(f.name || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/^(IMG|DSC|PXL|Screenshot|WhatsApp Image|Photo)\b.*$/i, '').replace(/^\d[\d\s:.]*$/, '').trim(); this.setState((s) => ({ draft: { ...s.draft, attachments: [...(s.draft.attachments || []), { id: this.Z.util.uid('att'), title: fromFile || this.Z.autoCaption(s.draft), image: img }] } })); }
       catch (err) { this.toast(err.message, 'error'); }
     }
     this.setState({ busy: '' });
   };
+  autoCap = (e) => { const i = Number(e.currentTarget.dataset.i); this.setState((s) => { const list = (s.draft.attachments || []).slice(); if (!list[i]) return null; list[i] = { ...list[i], title: this.Z.autoCaption(s.draft) }; return { draft: { ...s.draft, attachments: list } }; }); };
   onAttachPdf = async (e) => {
     const files = Array.from(e.target.files || []); e.target.value = ''; if (!files.length) return;
     const add = [];
@@ -2001,7 +2003,10 @@ class Component extends DCLogic {
   openPdfAttach = (e) => {
     const f = (this.state.draft.pdfAttachments || [])[+this.ds(e).idx]; if (!f) return;
     const b = atob(f.data.split(',')[1] || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([u], { type: 'application/pdf' })); window.open(url, '_blank'); setTimeout(() => URL.revokeObjectURL(url), 120000);
+    // Opens in the app's own PDF viewer (window.open of a blob is blocked on iPhone / the Home Screen app).
+    const blob = new Blob([u], { type: 'application/pdf' }); if (this.attUrl) URL.revokeObjectURL(this.attUrl); const url = this.attUrl = URL.createObjectURL(blob);
+    const filename = String(f.name || ((f.title || 'attachment') + '.pdf')).replace(/[\\/:*?"<>|]+/g, ' ');
+    this.built = { blob, url, filename }; this.setState({ dialog: { type: 'pdf', url, filename } });
   };
   removeAttach = (e) => { const i = +this.ds(e).idx; this.setState((s) => ({ draft: { ...s.draft, attachments: s.draft.attachments.filter((_, k) => k !== i) } })); };
   moveAttach = (e) => { const { idx, dir } = this.ds(e); const i = +idx, j = i + +dir; this.setState((s) => { const a = s.draft.attachments.slice(); if (j < 0 || j >= a.length) return null; const t = a[i]; a[i] = a[j]; a[j] = t; return { draft: { ...s.draft, attachments: a } }; }); };

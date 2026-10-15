@@ -733,11 +733,31 @@
       return [...groups.values()].map((g) => { const c = s.categories.find((x) => x.id === g.categoryId); return { title: [...new Set(g.names)].join(', '), period: g.period, category: c ? c.name : 'Other', wording: g.wording }; });
     },
     termsSections(q) {
+      // Payment Terms and Warranty sit directly under the "Confirmation & Payment" term (or at the end if there is no such term).
       const s = settingsService.get(); const out = []; const pt = this.paymentTerm(q);
-      if (pt) out.push({ title: 'Payment Terms', body: pt.wording });
+      // A term's lines that start with "-", "•" or "*" print as bullet points; any plain text before them stays as an intro paragraph.
+      const withBullets = (body) => {
+        const lines = String(body || '').split('\n'); const isB = (l) => /^\s*[-•*]\s+/.test(l);
+        if (!lines.some(isB)) return { body };
+        const intro = []; const bullets = [];
+        lines.forEach((l) => { if (isB(l)) bullets.push(l.replace(/^\s*[-•*]\s+/, '').trim()); else if (!l.trim()) return; else if (bullets.length) bullets[bullets.length - 1] += ' ' + l.trim(); else intro.push(l.trim()); });
+        return { body, intro: intro.join('\n'), bullets };
+      };
+      s.quotation.terms.forEach((t) => { if (String(t.title || '').trim() || String(t.body || '').trim()) out.push({ title: t.title, ...withBullets(fill(t.body, { company: s.company.name })) }); });
+      const extra = [];
+      if (pt) {
+        // Two bullets: the payment term itself, then where/how to pay (bank details + payment instructions from Settings → Company).
+        const term = String(pt.wording || '').replace(/^\s*payment\s+terms?\s*[:\-–]\s*/i, '').trim();
+        const c = s.company || {}; const bank = [c.bankName, c.bankAccountName, c.bankAccount ? 'Acc. No. ' + c.bankAccount : ''].filter((x) => String(x || '').trim()).join(' · ');
+        const det = [bank ? 'Payment to: ' + bank + '.' : '', String(c.paymentDetails || '').trim()].filter(Boolean).join(' ');
+        extra.push({ title: 'Payment Terms', body: pt.wording, bullets: det ? [term, det] : [term] });
+      }
       const w = this.warrantyEntries(q);
-      out.push({ title: 'Warranty', body: w.length ? w.map((e) => e.title + ' — ' + e.period + ' (' + e.category + '): ' + e.wording).join('\n') : 'No warranty is provided for the works stated in this quotation.' });
-      s.quotation.terms.forEach((t) => { if (String(t.title || '').trim() || String(t.body || '').trim()) out.push({ title: t.title, body: fill(t.body, { company: s.company.name }) }); });
+      extra.push({ title: 'Warranty', body: w.length ? w.map((e) => e.title + ' — ' + e.period + ' (' + e.category + '): ' + e.wording).join('\n') : 'No warranty is provided for the works stated in this quotation.' });
+      const norm = (x) => String(x || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z]/g, '');
+      let at = out.findIndex((t) => norm(t.title) === 'confirmationandpayment');
+      if (at < 0) at = out.findIndex((t) => /confirm/.test(norm(t.title)) && /payment/.test(norm(t.title)));
+      out.splice(at < 0 ? out.length : at + 1, 0, ...extra);
       return out;
     },
     validate(q) {
@@ -1214,10 +1234,17 @@
 
   const resetAll = () => { requireAdmin(); storageService.clearAll(); };
 
+  // Suggested photo caption from the document itself: the job scope(s) and project. Used when a photo has no title; always editable.
+  const autoCaption = (d) => {
+    const names = []; ((d && d.items) || []).forEach((it) => { const n = String((it && it.name) || '').trim(); if (n && names.indexOf(n) < 0) names.push(n); });
+    const proj = String(((d && d.project) || {}).name || '').trim();
+    const what = names.length === 1 ? names[0] : names.length > 1 ? names[0] + ' & ' + (names.length === 2 ? names[1] : 'Other Works') : '';
+    return (what ? what + ' — ' : '') + 'Existing Site Condition' + (proj && !what ? ' — ' + proj : '');
+  };
   ZW.util = { uid, num, r2, todayISO, addDays, addPeriod, validDate, periodOf, fill };
   Object.assign(ZW, {
     AppError, storageService, repos, settingsService, brandService, numberingService, customerService, quotationService, invoiceService, paymentService,
-    receiptService, warrantyService, authService, creatorOf, dashboardService, imageService, demoService, fmt, calcTotals, resetAll, itemPoints, custName,
+    receiptService, warrantyService, authService, creatorOf, dashboardService, imageService, demoService, fmt, calcTotals, resetAll, itemPoints, custName, autoCaption,
   });
   // ---------- one-time settings import (old device IndexedDB → Supabase zw_kv 'settings') ----------
   // Reads the pre-Supabase IndexedDB copy read-only; never modifies or deletes it. Admin only.
