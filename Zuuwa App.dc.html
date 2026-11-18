@@ -22,7 +22,7 @@
 <script src="_ds/modernist-12054ede-624e-4c9d-9934-b03897fd36f5/_ds_bundle.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="app/config.js?v=1790685222395"></script>
-<script src="app/services.js?v=1792067185037"></script>
+<script src="app/services.js?v=1794988694759"></script>
 <script src="app/report.js?v=1790761636845"></script>
 <script src="app/pdf.js?v=1792067185037"></script>
 <style>
@@ -138,6 +138,7 @@ select.input{appearance:auto}
     </nav>
     <div style="border-top:2px solid var(--color-divider);padding:14px 20px;display:flex;align-items:center;gap:10px">
       <div style="min-width:0;flex:1"><div style="font-size:12px;color:var(--color-neutral-700)">Logged in as</div><div style="font-weight:800;font-size:13px">{{ user.name }} <span style="font-weight:600;font-size:11.5px;color:var(--color-neutral-700)">· {{ roleLabel }}</span></div></div>
+      <button class="btn btn-secondary btn-icon" type="button" title="Refresh data" aria-label="Refresh data" disabled="{{ refreshBusy }}" onClick="{{ manualRefresh }}">{{ ic.refresh }}</button>
       <button class="btn btn-secondary btn-icon" type="button" title="Sign out" onClick="{{ logout }}">{{ ic.logout }}</button>
     </div>
   </aside>
@@ -150,10 +151,11 @@ select.input{appearance:auto}
     <span title="Logged in as {{ user.name }}" style="font-size:12px;font-weight:700;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ user.name }}</span>
     <button class="btn btn-secondary btn-icon" type="button" title="Customer Data" data-page="customers" onClick="{{ goNav }}">{{ ic.users }}</button>
     <sc-if value="{{ isAdmin }}" hint-placeholder-val="{{ false }}"><button class="btn btn-secondary btn-icon" type="button" title="Settings" data-page="settings" onClick="{{ goNav }}">{{ ic.sliders }}</button></sc-if>
+    <button class="btn btn-secondary btn-icon" type="button" title="Refresh data" aria-label="Refresh data" disabled="{{ refreshBusy }}" onClick="{{ manualRefresh }}">{{ ic.refresh }}</button>
     <button class="btn btn-secondary btn-icon" type="button" title="Sign out" onClick="{{ logout }}">{{ ic.logout }}</button>
   </header>
 </sc-if>
-<sc-if value="{{ syncBar.show }}" hint-placeholder-val="{{ false }}"><div role="status" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 16px;font-size:13px;font-weight:600;background:{{ syncBar.bg }};color:{{ syncBar.fg }};border-bottom:1px solid var(--color-divider)"><span style="flex:1 1 220px;min-width:0">{{ syncBar.text }}</span><sc-if value="{{ syncBar.canRetry }}" hint-placeholder-val="{{ false }}"><button class="btn btn-secondary" type="button" style="padding:6px 12px" onClick="{{ syncRetry }}">Retry now</button></sc-if></div></sc-if>
+<sc-if value="{{ syncBar.show }}" hint-placeholder-val="{{ false }}"><div role="status" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 16px;font-size:13px;font-weight:600;background:{{ syncBar.bg }};color:{{ syncBar.fg }};border-bottom:1px solid var(--color-divider)"><span style="flex:1 1 220px;min-width:0">{{ syncBar.text }}</span><sc-if value="{{ syncBar.canRetry }}" hint-placeholder-val="{{ false }}"><button class="btn btn-secondary" type="button" style="padding:6px 12px" onClick="{{ syncRetry }}">Retry now</button></sc-if><sc-if value="{{ syncBar.canSignIn }}" hint-placeholder-val="{{ false }}"><button class="btn btn-secondary" type="button" style="padding:6px 12px" onClick="{{ syncSignIn }}">Sign in again</button></sc-if></div></sc-if>
 <div style="width:100%;max-width:1280px;box-sizing:border-box;padding:clamp(16px,3vw,40px) clamp(14px,3vw,40px) {{ padBottom }}">
 
 <!-- DASHBOARD -->
@@ -192,6 +194,55 @@ select.input{appearance:auto}
       <div style="display:flex;flex-wrap:wrap;gap:8px"><button class="btn btn-primary" type="button" style="flex-shrink:0;white-space:nowrap;height:auto;min-height:44px" onClick="{{ newQuotation }}">{{ ic.plus }}<span>New Quotation</span></button><button class="btn btn-secondary" type="button" style="flex-shrink:0;white-space:nowrap;height:auto;min-height:44px" onClick="{{ loadDemo }}">{{ ic.refresh }}<span>Load Demo Data</span></button></div>
     </div>
   </sc-if>
+  <section aria-label="Financial overview" style="padding:22px 0 8px;display:grid;gap:12px">
+    <h2 style="margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Financial Overview</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:0;padding:1px;border-top:2px solid var(--color-divider);border-bottom:2px solid var(--color-divider)">
+      <button type="button" data-ff="balance" onClick="{{ setFinFilter }}" style="text-align:left;border:0;cursor:pointer;background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px;color:var(--color-text);min-width:0" style-hover="background:var(--color-surface)">
+        <span style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-accent-700)">Outstanding / Balance Due</span>
+        <span style="font-size:clamp(22px,2.6vw,30px);font-weight:800;letter-spacing:-.02em;line-height:1">{{ fin.outstanding }}</span>
+        <span style="font-size:13px;color:var(--color-neutral-700)">{{ fin.outSub }}</span>
+      </button>
+      <button type="button" data-ff="deposit" onClick="{{ setFinFilter }}" style="text-align:left;border:0;cursor:pointer;background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px;color:var(--color-text);min-width:0" style-hover="background:var(--color-surface)">
+        <span style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-warning-700, var(--color-accent-700))">Deposit Paid – Balance Invoice Required</span>
+        <span style="font-size:clamp(22px,2.6vw,30px);font-weight:800;letter-spacing:-.02em;line-height:1">{{ fin.depositPaid }}</span>
+        <span style="font-size:13px;color:var(--color-neutral-700)">{{ fin.depositSub }}</span>
+      </button>
+      <button type="button" data-ff="unpaid" onClick="{{ setFinFilter }}" style="text-align:left;border:0;cursor:pointer;background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px;color:var(--color-text);min-width:0" style-hover="background:var(--color-surface)">
+        <span style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-neutral-700)">Unpaid Invoices</span>
+        <span style="font-size:clamp(22px,2.6vw,30px);font-weight:800;letter-spacing:-.02em;line-height:1">{{ fin.unpaidInvoices }}</span>
+        <span style="font-size:13px;color:var(--color-neutral-700)">{{ fin.unpaidSub }}</span>
+      </button>
+      <button type="button" data-ff="paid" onClick="{{ setFinFilter }}" style="text-align:left;border:0;cursor:pointer;background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px;color:var(--color-text);min-width:0" style-hover="background:var(--color-surface)">
+        <span style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-success-700, var(--color-neutral-700))">Fully Paid</span>
+        <span style="font-size:clamp(22px,2.6vw,30px);font-weight:800;letter-spacing:-.02em;line-height:1">{{ fin.fullyPaid }}</span>
+        <span style="font-size:13px;color:var(--color-neutral-700)">{{ fin.paidSub }}</span>
+      </button>
+    </div>
+    <div role="tablist" aria-label="Filter contracts" style="display:flex;gap:6px;flex-wrap:wrap">
+      <sc-for list="{{ fin.filters }}" as="t" hint-placeholder-count="6"><button type="button" role="tab" aria-selected="{{ t.on }}" data-ff="{{ t.key }}" onClick="{{ setFinFilter }}" style="border:1px solid var(--color-divider);background:{{ t.bg }};color:{{ t.fg }};font:inherit;font-size:13px;font-weight:700;padding:8px 12px;min-height:40px;cursor:pointer;white-space:nowrap">{{ t.label }} ({{ t.n }})</button></sc-for>
+    </div>
+    <sc-if value="{{ fin.has }}" hint-placeholder-val="{{ false }}">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:0;padding:1px">
+        <sc-for list="{{ fin.rows }}" as="c" hint-placeholder-count="0">
+          <div style="background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:14px 16px;display:grid;gap:8px;min-width:0">
+            <button type="button" data-kind="quotation" data-id="{{ c.id }}" onClick="{{ openRow }}" style="all:unset;cursor:pointer;display:grid;gap:2px;min-width:0">
+              <span style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline"><strong style="font-size:15px">{{ c.number }}</strong><span style="font-size:12px;color:var(--color-neutral-700)">{{ c.date }}</span></span>
+              <span style="font-size:13.5px;overflow-wrap:anywhere">{{ c.who }}</span>
+            </button>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13.5px">
+              <span style="color:var(--color-neutral-700)">Contract</span><span style="text-align:right;font-variant-numeric:tabular-nums">{{ c.total }}</span>
+              <span style="color:var(--color-neutral-700)">Paid</span><span style="text-align:right;font-variant-numeric:tabular-nums">{{ c.paid }}</span>
+              <span style="font-weight:800">Balance</span><span style="text-align:right;font-weight:800;font-variant-numeric:tabular-nums">{{ c.balance }}</span>
+            </div>
+            <span class="{{ c.tag }}" style="justify-self:start;white-space:normal">{{ c.icon }} {{ c.status }}</span>
+            <sc-if value="{{ c.hasAction }}" hint-placeholder-val="{{ false }}"><button class="{{ c.actClass }}" type="button" style="justify-self:stretch;height:auto;min-height:44px;white-space:normal" data-fa="{{ c.act }}" data-qid="{{ c.id }}" data-iid="{{ c.iid }}" onClick="{{ finAction }}">{{ c.actLabel }}</button></sc-if>
+          </div>
+        </sc-for>
+      </div>
+      <sc-if value="{{ fin.more }}" hint-placeholder-val="{{ false }}"><button class="btn btn-ghost" type="button" style="justify-self:start" onClick="{{ finShowAll }}">{{ fin.moreLabel }}</button></sc-if>
+    </sc-if>
+    <sc-if value="{{ fin.empty }}" hint-placeholder-val="{{ false }}"><div style="font-size:14px;color:var(--color-neutral-700);padding:10px 0">{{ fin.emptyText }}</div></sc-if>
+  </section>
   <div style="margin-top:32px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
     <h2 style="margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Recent documents</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -549,6 +600,28 @@ select.input{appearance:auto}
     <div style="background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:16px"><div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;color:var(--color-neutral-700)">Remaining</div><div style="font-size:24px;font-weight:800;margin-top:6px">{{ qv.remaining }}</div></div>
     <div style="background:var(--color-bg);box-shadow:0 0 0 1px var(--color-divider);padding:16px"><div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;color:var(--color-neutral-700)">Invoiced so far</div><div style="font-size:24px;font-weight:800;margin-top:6px">{{ qv.billed }}</div><div style="font-size:12px;color:var(--color-neutral-700)">{{ qv.unbilled }} not yet invoiced</div></div>
   </div>
+  <sc-if value="{{ qv.fin.show }}" hint-placeholder-val="{{ false }}">
+  <section aria-label="Contract summary" style="padding:16px 0;border-bottom:2px solid var(--color-divider);display:grid;gap:10px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between"><h2 style="margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Contract Summary</h2><span class="{{ qv.fin.tag }}" style="white-space:normal">{{ qv.fin.icon }} {{ qv.fin.status }}</span></div>
+    <div style="display:grid;grid-template-columns:auto auto;justify-content:start;gap:3px 24px;font-size:14px">
+      <span style="color:var(--color-neutral-700)">Contract Total</span><span style="text-align:right;font-variant-numeric:tabular-nums">{{ qv.fin.total }}</span>
+      <span style="color:var(--color-neutral-700)">Total Invoiced</span><span style="text-align:right;font-variant-numeric:tabular-nums">{{ qv.fin.invoiced }}</span>
+      <span style="color:var(--color-neutral-700)">Total Paid</span><span style="text-align:right;font-variant-numeric:tabular-nums">{{ qv.fin.paid }}</span>
+      <span style="font-weight:800">Balance Due</span><span style="text-align:right;font-weight:800;font-variant-numeric:tabular-nums">{{ qv.fin.balance }}</span>
+    </div>
+    <sc-if value="{{ qv.fin.hasInvoices }}" hint-placeholder-val="{{ false }}">
+      <div style="display:grid;border-top:1px solid var(--color-divider)">
+        <sc-for list="{{ qv.fin.invoices }}" as="x" hint-placeholder-count="0">
+          <button type="button" data-kind="invoice" data-id="{{ x.id }}" onClick="{{ openRow }}" style="all:unset;cursor:pointer;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:9px 2px;border-bottom:1px solid var(--color-divider);font-size:13.5px" style-hover="background:var(--color-surface)">
+            <span style="font-weight:700;overflow-wrap:anywhere">{{ x.number }} · {{ x.type }}</span><span class="{{ x.tag }}" style="justify-self:end">{{ x.status }}</span>
+            <span style="color:var(--color-neutral-700)">Invoice {{ x.amount }} · paid {{ x.paid }}</span><span style="text-align:right;color:var(--color-neutral-700)">Invoice balance {{ x.balance }}</span>
+          </button>
+        </sc-for>
+      </div>
+    </sc-if>
+    <sc-if value="{{ qv.fin.hasAction }}" hint-placeholder-val="{{ false }}"><button class="{{ qv.fin.actClass }}" type="button" style="justify-self:start;height:auto;min-height:44px;white-space:normal" data-fa="{{ qv.fin.act }}" data-qid="{{ qv.fin.id }}" data-iid="{{ qv.fin.iid }}" onClick="{{ finAction }}">{{ qv.fin.actLabel }}</button></sc-if>
+  </section>
+  </sc-if>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:24px;padding:22px 0;border-bottom:2px solid var(--color-divider)">
     <div><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-accent-700);margin-bottom:8px">Customer</div><div style="font-weight:800">{{ qv.custDisplay }}</div><div>{{ qv.customer.company }}</div><div style="color:var(--color-neutral-700);white-space:pre-line;font-size:14px">{{ qv.customer.address }}</div><div style="color:var(--color-neutral-700);font-size:14px">{{ qv.customer.phone }} {{ qv.customer.email }}</div></div>
     <div><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--color-accent-700);margin-bottom:8px">Project / Site</div><div style="font-weight:800">{{ qv.project.name }}</div><div style="color:var(--color-neutral-700);white-space:pre-line;font-size:14px">{{ qv.project.siteAddress }}</div></div>
@@ -1557,6 +1630,7 @@ class Component extends DCLogic {
       up: '<path d="m18 15-6-6-6 6"/>',
       down: '<path d="m6 9 6 6 6-6"/>',
       search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+      refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
       logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
       drop: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/>',
       image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
@@ -1643,7 +1717,22 @@ class Component extends DCLogic {
     if (!this.state.user) return;
     this.setState({ user: null, page: 'dashboard', draft: null, dialog: null, drawer: false, sd: null, login: { ...this.state.login, password: '', error: 'Your session expired — please sign in again.' } });
   }
-  syncRetry = () => { const S = this.Z.storageService; if (S.retry) S.retry(); };
+  syncRetry = async () => { const S = this.Z.storageService; if (!S.retry) return; const r = await S.retry(); if (r && r.skipped === 'cooldown') this.toast('Please wait a moment before trying again.'); };
+  // Manual Refresh: shares the 3-minute cooldown; taps while a refresh is running reuse the same request.
+  manualRefresh = async () => {
+    const S = this.Z.storageService; if (!S.syncNow || this.state.refreshing) return;
+    this.setState({ refreshing: true });
+    try {
+      const r = await S.syncNow();
+      if (r && r.ok) this.toast('Data refreshed.');
+      else if (r && r.skipped === 'cooldown') this.toast('Data is up to date (refreshed ' + Math.max(1, Math.round(r.since / 60000)) + ' min ago). You can refresh again in ' + Math.max(1, Math.ceil(r.waitMs / 60000)) + ' min.');
+      else if (r && r.skipped === 'pending') this.toast('Saving your changes first — please refresh again in a moment.');
+      else if (r && r.error === 'restricted') this.toast('Supabase service is temporarily restricted. Please try again later.', 'error');
+      else if (r && r.error === 'auth') this.toast('Your session has expired. Please sign in again.', 'error');
+      else if (r && r.error) this.toast('Could not reach the server. Showing the last loaded data.', 'error');
+    } finally { this.setState({ refreshing: false }); }
+  };
+  syncSignIn = async () => { try { await this.Z.authService.logout(); } catch (_) {} this.setState({ user: null, page: 'dashboard', draft: null, dialog: null, drawer: false, sd: null, login: { ...this.state.login, password: '', error: 'Your session expired — please sign in again.' } }); };
   logout = async () => {
     this.flushSettings(); const S = this.Z.storageService;
     if (S.hasUnsent && S.hasUnsent()) { this.toast('Some changes have not reached the cloud yet. Reconnect to the internet and wait for them to send before signing out.', 'error'); if (S.retry) S.retry(); return; }
@@ -2171,6 +2260,44 @@ class Component extends DCLogic {
   scopeDelete = (e) => { const i = +this.ds(e).idx; const sc = this.state.sd.jobScopes[i]; this.setState({ dialog: { type: 'confirm', title: 'Delete job scope?', body: 'Are you sure you want to delete "' + sc.name + '"?', note: 'Existing quotations keep their line items.', okLabel: 'Delete', action: { name: 'removeList', list: 'jobScopes', idx: i } } }); };
 
   // ---------- view models ----------
+  finTag(st) { const S = this.Z.financeService.S; return st === S.PAID ? ['tag tag-success', '🟢'] : st === S.UNPAID ? ['tag tag-warning', '🟡'] : st === S.NONE ? ['tag tag-neutral', '⚪'] : ['tag tag-accent', '🟠']; }
+  finRow(c) {
+    const f = this.Z.fmt; const S = this.Z.financeService.S; const [tag, icon] = this.finTag(c.status);
+    let act = '', actLabel = '', actClass = 'btn btn-secondary', iid = '';
+    if (c.canGenerateBalance) { act = 'genBalance'; actLabel = 'Generate Balance Invoice ' + f.money(c.balance); actClass = 'btn btn-primary'; }
+    else if (c.balanceInvoice && c.status !== S.PAID) { act = 'view'; iid = c.balanceInvoice.id; actLabel = 'View Balance Invoice'; }
+    else if (c.status === S.UNPAID && c.unpaidInvoice) { act = 'view'; iid = c.unpaidInvoice.id; actLabel = 'View Invoice ' + c.unpaidInvoice.number; }
+    else if (c.status === S.NONE) { act = 'newInvoice'; actLabel = 'Create Invoice'; }
+    return { id: c.q.id, number: c.q.number, who: this.Z.custName(c.q.customer), date: f.date(c.q.date), total: f.money(c.total), paid: f.money(c.paid), balance: f.money(c.balance), invoiced: f.money(c.invoiced), status: c.status, tag, icon, act, actLabel, actClass, iid, hasAction: !!act };
+  }
+  vmFinance() {
+    const Z = this.Z, f = Z.fmt; const S = Z.financeService.S; const o = Z.financeService.overview(); const F = this.state.finFilter || 'all';
+    const map = { all: null, balance: S.BAL, deposit: S.DEP, unpaid: S.UNPAID, paid: S.PAID, none: S.NONE };
+    const pick = (k) => (k === 'all' ? o.list : k === 'balance' ? o.list.filter((c) => c.status === S.BAL || c.status === S.DEP) : o.list.filter((c) => c.status === map[k]));
+    const filters = [['all', 'All'], ['balance', 'Balance Due'], ['deposit', 'Deposit Paid'], ['unpaid', 'Unpaid'], ['paid', 'Fully Paid'], ['none', 'No Invoice']].map(([key, label]) => ({ key, label, n: pick(key).length, on: F === key, bg: F === key ? 'var(--color-text)' : 'var(--color-bg)', fg: F === key ? 'var(--color-bg)' : 'var(--color-text)' }));
+    const all = pick(F); const lim = this.state.finAll ? all.length : 8; const rows = all.slice(0, lim).map((c) => this.finRow(c));
+    return { outstanding: f.money(o.outstanding), outSub: o.openContracts + (o.openContracts === 1 ? ' contract not fully paid' : ' contracts not fully paid'),
+      depositPaid: String(o.depositPaid), depositSub: o.depositPaid === 1 ? 'quotation needs a balance invoice' : 'quotations need a balance invoice',
+      unpaidInvoices: String(o.unpaidInvoices), unpaidSub: f.money(o.unpaidInvoiceAmount) + ' unpaid / partially paid',
+      fullyPaid: String(o.fullyPaid), paidSub: o.fullyPaid === 1 ? 'quotation fully paid' : 'quotations fully paid',
+      filters, rows, has: rows.length > 0, empty: !rows.length, emptyText: o.list.length ? 'No quotations in this group.' : 'No approved or invoiced quotations yet.',
+      more: all.length > lim, moreLabel: 'Show all ' + all.length };
+  }
+  setFinFilter = (e) => this.setState({ finFilter: e.currentTarget.dataset.ff || 'all', finAll: false });
+  finShowAll = () => this.setState({ finAll: true });
+  finAction = (e) => {
+    this.stop(e); const { fa, qid, iid } = e.currentTarget.dataset; const Z = this.Z;
+    try {
+      if (fa === 'view' && iid) return this.go('invoices', iid);
+      if (fa === 'newInvoice') return this.setState({ dialog: { type: 'newInvoice', quotationId: qid, invType: 'Deposit', error: '' } });
+      if (fa === 'genBalance') {
+        const c = Z.financeService.contract(Z.quotationService.get(qid));
+        if (!c.canGenerateBalance) { if (c.balanceInvoice) return this.go('invoices', c.balanceInvoice.id); return this.toast('A balance invoice is not needed for this quotation.'); }
+        const d = Z.invoiceService.fromQuotation(qid, 'Balance'); d.amount = String(Z.util.r2(Math.min(Number(d.amount) || c.balance, c.balance)));
+        this.edit('invoice', d);
+      }
+    } catch (err) { this.fail(err); }
+  };
   vmDashboard() {
     const Z = this.Z, f = Z.fmt; const S = Z.dashboardService.summary();
     const latest = (arr, n) => arr.slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).slice(0, n || 4);
@@ -2266,6 +2393,7 @@ class Component extends DCLogic {
       items: t.lines.map((l, i) => ({ no: i + 1, name: l.name, desc: l.description, qty: l.pricing === 'lump' ? 'Lump sum' : f.qty(l.qty) + ' ' + l.unit, rate: l.pricing === 'lump' ? '—' : f.money(l.rate), amount: f.money(l.amount), warranty: l.warrantyPeriod || '—' })),
       subtotal: f.money(t.subtotal), hasDiscount: t.discount > 0, discount: f.money(t.discount), hasTax: t.tax > 0, tax: f.money(t.tax), taxLabel: (q.tax && q.tax.label) || 'Tax', attachCount: (q.attachments || []).length + ' attachment' + ((q.attachments || []).length === 1 ? '' : 's'),
       pays, hasPays: pays.length > 0, noPays: !pays.length, rel, hasRel: rel.length > 0, noRel: !rel.length,
+      fin: (() => { const c = Z.financeService.contract(q); const r = this.finRow(c); return { ...r, show: Z.financeService.isContract(q), invoices: c.invoices.map((x) => ({ id: x.inv.id, number: x.inv.number, type: x.type, amount: f.money(x.amount), paid: f.money(x.paid), balance: f.money(x.balance), status: x.status, tag: this.tag(x.status) })), hasInvoices: c.invoices.length > 0 }; })(),
       canPay: sum.remaining > 0.005, canInvoice: st !== 'Rejected' && sum.unbilled > 0.005, statusOptions: [['Draft', 'Draft'], ['Sent', 'Sent'], ['Approved', 'Approved — Waiting Payment'], ['Rejected', 'Rejected']].map(([value, label]) => ({ value, label })),
     };
   }
@@ -2535,11 +2663,13 @@ class Component extends DCLogic {
       loginBusy: !!(s.loggingIn || s.restoring), loginBtn: s.restoring ? 'Checking session…' : s.loggingIn ? 'Signing in…' : 'Sign in',
       loginNote: this.Z.cloud ? 'Signed in securely with Supabase. Forgot your password? Ask the admin to reset it in Supabase → Authentication.' : 'Local test mode — data stays on this device.',
       syncBar: (() => { if (!this.Z.cloud || !s.user) return { show: false }; const St = this.Z.storageService; const y = (St.status ? St.status() : s.sync) || {};
+        if (y.state === 'restricted') return { show: true, text: y.message + (y.pending ? ' (' + y.pending + ' unsent)' : ''), canRetry: true, bg: 'var(--color-warning-100, var(--color-danger-100))', fg: 'var(--color-warning-700, var(--color-danger-700))' };
+        if (y.state === 'auth') return { show: true, text: y.message, canSignIn: true, bg: 'var(--color-danger-100)', fg: 'var(--color-danger-700)' };
         if (y.state === 'offline') return { show: true, text: y.message + (y.pending ? ' (' + y.pending + ' unsent)' : ''), canRetry: true, bg: 'var(--color-danger-100)', fg: 'var(--color-danger-700)' };
         if (y.pending) return { show: true, text: 'Saving to cloud… (' + y.pending + ')', canRetry: false, bg: 'var(--color-neutral-100)', fg: 'var(--color-text)' };
         return { show: false }; })(),
       toast: s.toast, hasToast: !!s.toast, toastBg: s.toast && s.toast.error ? 'var(--color-danger-700)' : 'var(--color-text)',
-      busy: s.busy, isBusy: !!s.busy, dlg: { open: false },
+      busy: s.busy, isBusy: !!s.busy, dlg: { open: false }, refreshBusy: !!s.refreshing,
     };
     if (s.ready && s.user && this.Z.cloud && !s.restoring && !this.Z.authService.current()) {
       // Confirm with Supabase before signing out; a valid session is restored instead of showing the login screen.
@@ -2562,7 +2692,7 @@ class Component extends DCLogic {
       drawer: s.drawer, toggleDrawer: () => this.setState((x) => ({ drawer: !x.drawer })),
       dlg: this.vmDialog(),
     };
-    if (is.dashboard) out.dash = this.vmDashboard();
+    if (is.dashboard) { out.dash = this.vmDashboard(); out.fin = this.vmFinance(); }
     if (is.quotations) out.L = this.vmList('quotations');
     if (is.customers) { const Z = this.Z; out.cust = (() => { const all = Z.customerService.list(); const rows = Z.customerService.search(s.custQ).map((c) => { const co = c.type === 'company' || (!c.type && c.company); return { id: c.id, title: co ? (c.company || c.name) : c.name, sub: co ? (c.company && c.name && c.name !== c.company ? 'Attn: ' + c.name : '') : (c.company || ''), kind: c.type === 'company' ? 'Company' : c.type === 'individual' ? 'Individual' : '', hasKind: !!c.type, contact: [c.phone, c.email].filter(Boolean).join(' · '), hasContact: !!(c.phone || c.email), address: c.address || '', hasAddress: !!c.address }; });
         return { q: s.custQ || '', rows, has: rows.length > 0, noneAtAll: !all.length, noneFound: !!all.length && !rows.length, count: all.length + (all.length === 1 ? ' saved customer' : ' saved customers') }; })(); }
