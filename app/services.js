@@ -103,7 +103,15 @@
     const cache = {}; const snap = {}; const onServer = {}; const subs = new Set(); let onErr = (m) => console.error(m);
     // Server version (updated_at) of every row this device last saw. Saves are only accepted if the row is still at that version.
     const ver = {};
-    let sb = null; let uid = null; let queue = []; let flushing = false; let retryT = null; let pullT = null;
+    let sb = null; let uid = null; let queue = []; let flushing = false; let retryT = null;
+    // ---- sync scheduling (Fix #1): no polling. Pull on sign-in, on return to foreground / reconnect (3-min cooldown), or on manual Refresh.
+    const SYNC_COOLDOWN = 3 * 60 * 1000;
+    const PULL_BACKOFF = [60e3, 120e3, 300e3, 600e3];        // failed pull: 1 → 2 → 5 → 10 min (max)
+    const FLUSH_BACKOFF = [8e3, 60e3, 120e3, 300e3, 600e3];  // unsent changes: first retry 8 s, then 1 → 2 → 5 → 10 min (max)
+    const RESTRICTED_MSG = 'Supabase service is temporarily restricted. Please try again later.';
+    const AUTH_MSG = 'Your session has expired. Please sign in again.';
+    let lastSyncAt = 0; let syncing = null; let pullFails = 0; let flushFails = 0; let backoffT = null; let lastRetryAt = 0;
+    let halted = ''; // '' | 'restricted' (HTTP 402) | 'auth' (HTTP 401 and the session could not be refreshed)
     const status = { state: 'idle', pending: 0, failed: [], lastSync: null, message: '' };
     const statusSubs = new Set();
     const setStatus = (p) => { Object.assign(status, p, { pending: queue.length }); statusSubs.forEach((f) => { try { f({ ...status }); } catch (_) {} }); };
@@ -117,7 +125,8 @@
     const client = () => {
       if (sb) return sb;
       if (!window.supabase || !window.supabase.createClient) throw new AppError('Could not load the Supabase library. Check your internet connection and reload.');
-      sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, { auth: { storage: authStorage, persistSession: true, autoRefreshToken: true } });
+      sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, { auth: { storage: authStorage, persistSession: true, autoRefreshToken: true },
+        global: { fetch: (input, init) => fetch(input, init).then((r) => { watchHttp(String((input && input.url) || input), r.status); return r; }) } });
       return sb;
     };
     const qKey = () => 'zuuwa.cloud.queue.' + (uid || 'none');
@@ -141,6 +150,42 @@
       op.base = verOf(op.key, op.id) || null; if (inflight) op.afterOwn = true;
       queue.push(op);
     };
+    // Every Supabase response passes through here: 402 stops all automatic requests, 401 checks the session once.
+    function watchHttp(url, code) {
+      if (code === 402 && /\/(rest|auth|storage)\/v1\//.test(url)) {
+        if (halted !== 'restricted') { halted = 'restricted'; clearTimeout(backoffT); clearTimeout(retryT); setStatus({ state: 'restricted', message: RESTRICTED_MSG }); }
+      } else if (code === 401 && /\/rest\/v1\//.test(url) && !halted) { halted = 'auth'; clearTimeout(backoffT); clearTimeout(retryT); checkAuth(); }
+    }
+    async function checkAuth() {
+      try { const { data, error } = await client().auth.refreshSession(); if (!error && data && data.session) { if (halted === 'auth') halted = ''; return; } } catch (_) {}
+      if (halted === 'auth') setStatus({ state: 'auth', message: AUTH_MSG });
+    }
+    // One pull at a time; automatic pulls respect the cooldown, failures back off, 402/401 stop them.
+    function sync(reason) {
+      if (!uid) return Promise.resolve({ skipped: 'signed-out' });
+      if (syncing) return syncing;
+      if (halted === 'auth') return Promise.resolve({ error: 'auth' });
+      if (halted === 'restricted' && reason !== 'manual' && reason !== 'force') return Promise.resolve({ error: 'restricted' });
+      const since = Date.now() - lastSyncAt;
+      if (reason !== 'force' && reason !== 'backoff' && since < SYNC_COOLDOWN) return Promise.resolve({ skipped: 'cooldown', since, waitMs: SYNC_COOLDOWN - since });
+      if (queue.length && reason !== 'force') { if (!halted) flush(); return Promise.resolve({ skipped: 'pending' }); }
+      lastSyncAt = Date.now(); clearTimeout(backoffT);
+      syncing = (async () => {
+        try {
+          await pullAll(); pullFails = 0; if (halted === 'restricted') halted = '';
+          if (status.state !== 'saving') setStatus({ state: 'saved', lastSync: Date.now(), message: '' });
+          return { ok: true };
+        } catch (e) {
+          if (halted === 'restricted') { setStatus({ state: 'restricted', message: RESTRICTED_MSG }); return { error: 'restricted' }; }
+          if (halted === 'auth') return { error: 'auth' };
+          const wait = PULL_BACKOFF[Math.min(pullFails, PULL_BACKOFF.length - 1)]; pullFails++;
+          setStatus({ state: 'offline', message: 'Not connected — showing the last loaded data. Trying again in ' + Math.round(wait / 60000) + ' min.' });
+          backoffT = setTimeout(() => sync('backoff'), wait);
+          return { error: 'network' };
+        } finally { syncing = null; }
+      })();
+      return syncing;
+    }
     // ---- pull ----
     async function fetchTable(key) {
       const out = []; const size = 500;
@@ -150,6 +195,65 @@
       }
       return out;
     }
+    // ---- incremental pull (Fix #2) ----
+    // 1) download only id + updated_at for every row (tiny), 2) download full data only for rows that are new or changed,
+    // 3) rows missing from the list were deleted on the server. Unchanged rows are reused from this device's cache.
+    async function fetchManifest(table, cols) {
+      const out = []; const size = 1000;
+      for (let from = 0; ; from += size) {
+        const { data, error } = await client().from(table).select(cols).order(cols.split(',')[0]).range(from, from + size - 1);
+        if (error) throw error; out.push(...data); if (data.length < size) break;
+      }
+      return out;
+    }
+    async function fetchByIds(key, ids) {
+      const out = [];
+      for (let i = 0; i < ids.length; i += 50) {
+        const { data, error } = await client().from(TABLES[key]).select('id,data,updated_at').in('id', ids.slice(i, i + 50));
+        if (error) throw error; out.push(...data);
+      }
+      return out;
+    }
+    async function pullTable(key) {
+      const man = await fetchManifest(TABLES[key], 'id,updated_at');
+      const pend = pendingIds(key); const known = ver[key] || {}; const have = new Map((cache[key] || []).map((r) => [r.id, r]));
+      const need = man.filter((m) => !pend.has(m.id) && !(known[m.id] === m.updated_at && have.has(m.id))).map((m) => m.id);
+      let fresh;
+      if (need.length > 25 && need.length > man.length * 0.5) fresh = await fetchTable(key); // first load on a device: one paged download is cheaper than many small ones
+      else fresh = need.length ? await fetchByIds(key, need) : [];
+      const byId = new Map(fresh.map((r) => [r.id, r]));
+      const rows = [];
+      man.forEach((m) => {
+        const f = byId.get(m.id); if (f) { rows.push(f); return; }
+        if (pend.has(m.id) || have.has(m.id)) rows.push({ id: m.id, updated_at: m.updated_at, data: have.get(m.id) || null });
+      });
+      return rows.filter((r) => r.data || pend.has(r.id));
+    }
+    async function pullKv() {
+      const man = await fetchManifest('zw_kv', 'key,updated_at');
+      const pend = pendingIds('kv'); const known = ver.kv || {};
+      const need = man.filter((m) => KV.indexOf(m.key) >= 0 && !pend.has(m.key) && !(known[m.key] === m.updated_at && m.key in cache)).map((m) => m.key);
+      let fresh = [];
+      if (need.length) { const { data, error } = await client().from('zw_kv').select('key,value,updated_at').in('key', need); if (error) throw error; fresh = data; }
+      return { man, fresh };
+    }
+    // ---- device cache: server-confirmed rows kept in IndexedDB per user, so reopening the app does not re-download everything ----
+    const LDB = 'zuuwa-cloud-cache'; let persistT = null;
+    const ldb = () => new Promise((res) => { if (!window.indexedDB) return res(null); let r; try { r = indexedDB.open(LDB, 1); } catch (_) { return res(null); } r.onupgradeneeded = () => { try { r.result.createObjectStore('c'); } catch (_) {} }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); r.onblocked = () => res(null); });
+    async function loadDevice(u) {
+      const db = await ldb(); if (!db) return null;
+      return new Promise((res) => { try { const q = db.transaction('c', 'readonly').objectStore('c').get(u); q.onsuccess = () => { db.close(); res(q.result || null); }; q.onerror = () => { db.close(); res(null); }; } catch (_) { db.close(); res(null); } });
+    }
+    function persistSoon() { clearTimeout(persistT); persistT = setTimeout(persistNow, 1500); }
+    async function persistNow() {
+      const u = uid; if (!u) return;
+      const pk = (k) => pendingIds(k); const out = { v: 1, savedAt: Date.now(), tables: {}, kv: {} };
+      Object.keys(TABLES).forEach((k) => { const p = pk(k); const vv = ver[k] || {}; out.tables[k] = (cache[k] || []).filter((r) => r && !p.has(r.id) && vv[r.id]).map((r) => ({ id: r.id, updated_at: vv[r.id], data: r })); });
+      const pkv = pk('kv'); KV.forEach((k) => { if (k in cache && !pkv.has(k) && ver.kv && ver.kv[k]) out.kv[k] = { value: cache[k], updated_at: ver.kv[k] }; });
+      const db = await ldb(); if (!db || uid !== u) { if (db) db.close(); return; }
+      try { const t = db.transaction('c', 'readwrite'); t.objectStore('c').put(out, u); t.oncomplete = () => db.close(); t.onerror = () => db.close(); } catch (_) { db.close(); }
+    }
+    async function forgetDevice(u) { clearTimeout(persistT); const db = await ldb(); if (!db) return; try { const t = db.transaction('c', 'readwrite'); t.objectStore('c').delete(u); t.oncomplete = () => db.close(); t.onerror = () => db.close(); } catch (_) { db.close(); } }
     function mergeTable(key, rows) {
       const pend = pendingIds(key); const local = cache[key] || []; const byId = new Map(local.map((r) => [r.id, r]));
       const next = []; const seen = new Set();
@@ -161,14 +265,14 @@
     }
     async function pullAll() {
       const keys = Object.keys(TABLES);
-      const res = await Promise.all(keys.map((k) => fetchTable(k)));
+      const [res, kv] = await Promise.all([Promise.all(keys.map((k) => pullTable(k))), pullKv()]);
       keys.forEach((k, n) => { snap[k] = snap[k] || {}; mergeTable(k, res[n]); });
-      const { data, error } = await client().from('zw_kv').select('key,value,updated_at'); if (error) throw error;
-      ver.kv = {}; data.forEach((d) => { ver.kv[d.key] = d.updated_at; });
+      const fresh = new Map(kv.fresh.map((d) => [d.key, d])); const listed = new Set(kv.man.map((m) => m.key));
+      ver.kv = {}; kv.man.forEach((d) => { ver.kv[d.key] = d.updated_at; });
       const pendKv = pendingIds('kv');
-      try { const st = data.find((d) => d.key === 'settings'); localStorage.setItem('zuuwa.loginImages', JSON.stringify((st && st.value && st.value.loginImages) || {})); } catch (_) {}
-      KV.forEach((k) => { const row = data.find((d) => d.key === k); if (pendKv.has(k)) return; if (row) { cache[k] = row.value; snap.kv[k] = JSON.stringify(row.value); } else { delete cache[k]; delete snap.kv[k]; } });
-      setStatus({ lastSync: Date.now() }); emit('*');
+      KV.forEach((k) => { if (pendKv.has(k)) return; const f = fresh.get(k); if (f) { cache[k] = f.value; snap.kv[k] = JSON.stringify(f.value); } else if (!listed.has(k)) { delete cache[k]; delete snap.kv[k]; } });
+      try { const st = cache.settings; localStorage.setItem('zuuwa.loginImages', JSON.stringify((st && st.loginImages) || {})); } catch (_) {}
+      setStatus({ lastSync: Date.now() }); emit('*'); persistSoon();
     }
     // ---- push ----
     const isNetwork = (e) => !e || !e.code || /fetch|network|Failed to fetch|Load failed/i.test(String(e.message || e));
@@ -187,14 +291,14 @@
           const list = (cache[op.key] || []).filter((r) => r.id !== op.id); if (data) { list.push(data.data); snap[op.key][op.id] = JSON.stringify(data.data); ver[op.key][op.id] = data.updated_at; (onServer[op.key] = onServer[op.key] || new Set()).add(op.id); } else { delete snap[op.key][op.id]; delete ver[op.key][op.id]; }
           cache[op.key] = list;
         }
-        emit(op.key === 'kv' ? op.id : op.key);
+        emit(op.key === 'kv' ? op.id : op.key); persistSoon();
       } catch (_) {}
     }
     // A new document whose number was taken on another device gets the next free number automatically.
     async function renumber(op) {
       const kind = { quotations: 'quotation', invoices: 'invoice', receipts: 'receipt' }[op.key]; if (!kind || op.type !== 'upsert') return false;
       if (onServer[op.key] && onServer[op.key].has(op.id)) return false;
-      mergeTable(op.key, await fetchTable(op.key));
+      mergeTable(op.key, await pullTable(op.key));
       const rec = (cache[op.key] || []).find((r) => r.id === op.id); if (!rec) return false;
       const others = { ...rec, id: rec.id }; let num;
       if (kind === 'invoice') num = rec.parentInvoiceId ? numberingService.suggestLinkedInvoice(rec.parentInvoiceId, rec.id).number : numberingService.suggestInvoice({ date: rec.date || todayISO(), quotationId: rec.quotationId, excludeId: rec.id });
@@ -230,7 +334,7 @@
     // A rejected (conflicting) change is kept on this device for recovery — the last 10 only.
     function keepRejected(op) { try { const k = 'zuuwa.conflicts'; const list = JSON.parse(localStorage.getItem(k) || '[]'); list.unshift({ at: new Date().toISOString(), key: op.key, id: op.id, type: op.type, data: op.row ? op.row.data : op.value }); localStorage.setItem(k, JSON.stringify(list.slice(0, 10))); } catch (_) {} }
     async function flush() {
-      if (flushing || !uid) return; flushing = true; clearTimeout(retryT);
+      if (flushing || !uid || halted) return; flushing = true; clearTimeout(retryT);
       try {
         while (queue.length) {
           const op = queue[0]; op.inflight = true; setStatus({ state: 'saving' });
@@ -263,12 +367,13 @@
             onErr(conflict.message + ' Your change was not saved, so nothing was overwritten. The latest version is now shown — please check it and make your change again.');
             await revert(op); continue;
           }
-          if (error && isNetwork(error)) { saveQueue(); setStatus({ state: 'offline', message: 'Not connected — changes are kept on this device and will be sent automatically.' }); retryT = setTimeout(flush, 8000); return; }
+          if (error && halted) { saveQueue(); setStatus(halted === 'restricted' ? { state: 'restricted', message: RESTRICTED_MSG + ' Your changes are kept on this device.' } : { state: 'auth', message: AUTH_MSG }); return; }
+          if (error && isNetwork(error)) { saveQueue(); const wait = FLUSH_BACKOFF[Math.min(flushFails, FLUSH_BACKOFF.length - 1)]; flushFails++; setStatus({ state: 'offline', message: 'Not connected — changes are kept on this device and will be sent automatically.' }); retryT = setTimeout(flush, wait); return; }
           if (error && error.code === '23505' && (await renumber(op).catch(() => false))) { saveQueue(); continue; }
           queue.shift(); saveQueue();
           if (error) { const msg = friendly(error); status.failed.push({ at: Date.now(), message: msg }); onErr(msg + ' The change was not saved.'); await revert(op); }
         }
-        setStatus({ state: 'saved', lastSync: Date.now(), message: '' });
+        flushFails = 0; setStatus({ state: 'saved', lastSync: Date.now(), message: '' }); persistSoon();
       } finally { flushing = false; }
     }
     function write(k, v) {
@@ -287,14 +392,29 @@
     resetMemory();
     async function start(userId) {
       uid = userId; loadQueue(); resetMemory();
+      halted = ''; pullFails = 0; flushFails = 0; clearTimeout(backoffT); lastSyncAt = Date.now();
+      // Device cache first: unchanged rows are not downloaded again.
+      try {
+        const dev = await loadDevice(userId);
+        if (dev && dev.v === 1 && uid === userId) {
+          Object.keys(TABLES).forEach((k) => { const rows = (dev.tables && dev.tables[k]) || []; cache[k] = rows.map((r) => r.data); ver[k] = {}; rows.forEach((r) => { ver[k][r.id] = r.updated_at; }); });
+          ver.kv = {}; Object.entries(dev.kv || {}).forEach(([k, o]) => { if (KV.indexOf(k) >= 0) { cache[k] = o.value; ver.kv[k] = o.updated_at; } });
+        }
+      } catch (_) {}
       // Re-apply unsent changes from a previous session on this device on top of the server copy.
       await pullAll();
       queue.forEach((op) => { if (op.key === 'kv') { if (op.type === 'upsert') cache[op.id] = op.value; else delete cache[op.id]; return; } const list = (cache[op.key] || []).filter((r) => r.id !== op.id); if (op.type === 'upsert') list.push(op.row.data); cache[op.key] = list; });
       emit('*'); flush();
-      clearInterval(pullT); pullT = setInterval(() => { if (!queue.length && document.visibilityState !== 'hidden') pullAll().then(() => { if (status.state === 'offline' && !queue.length) setStatus({ state: 'saved', lastSync: Date.now(), message: '' }); }).catch(() => setStatus({ state: 'offline', message: 'Not connected — showing the last loaded data.' })); }, 20000);
     }
-    const onVisible = () => { if (uid && document.visibilityState === 'visible') { if (queue.length) flush(); else pullAll().then(() => { if (status.state === 'offline') setStatus({ state: 'saved', lastSync: Date.now(), message: '' }); }).catch(() => {}); } };
-    document.addEventListener('visibilitychange', onVisible); window.addEventListener('online', () => { if (!uid) return; if (queue.length) flush(); else pullAll().then(() => { if (status.state === 'offline') setStatus({ state: 'saved', lastSync: Date.now(), message: '' }); }).catch(() => {}); });
+    // Only a hidden → visible change counts; the pull itself is rate-limited by sync().
+    let wasHidden = document.visibilityState === 'hidden';
+    const onVisible = () => {
+      if (document.visibilityState === 'hidden') { wasHidden = true; return; }
+      if (!wasHidden) return; wasHidden = false;
+      if (uid) sync('visible');
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', () => { if (!uid) return; if (queue.length) { flushFails = 0; flush(); } else sync('online'); });
     return {
       init: async () => {},
       backend: () => 'Supabase (' + CFG.supabaseUrl + ')',
@@ -311,10 +431,18 @@
       onError(f) { onErr = f; },
       onStatus(f) { statusSubs.add(f); f({ ...status }); return () => statusSubs.delete(f); },
       status: () => ({ ...status, pending: queue.length }),
-      retry: () => flush(),
-      refresh: () => pullAll(),
+      // "Retry now": at most once per 30 s; sends unsent changes, otherwise a manual pull (3-min cooldown).
+      retry() {
+        const now = Date.now(); if (now - lastRetryAt < 30000) return Promise.resolve({ skipped: 'cooldown' }); lastRetryAt = now;
+        if (halted === 'auth') return Promise.resolve({ error: 'auth' });
+        if (queue.length) { if (halted === 'restricted') halted = ''; flushFails = 0; return flush(); }
+        return sync('manual');
+      },
+      syncNow: () => sync('manual'),
+      refresh: () => sync('force'),
       client, start,
-      stop() { uid = null; clearInterval(pullT); clearTimeout(retryT); queue = []; resetMemory(); emit('*'); },
+      forgetDevice: () => (uid ? forgetDevice(uid) : Promise.resolve()),
+      stop() { clearTimeout(persistT); uid = null; clearTimeout(retryT); clearTimeout(backoffT); halted = ''; lastSyncAt = 0; pullFails = 0; flushFails = 0; queue = []; resetMemory(); emit('*'); },
       hasUnsent: () => queue.length > 0,
     };
   })();
@@ -1125,7 +1253,7 @@
         await loadProfiles(res.data.user); await cloudStore.start(me.userId); return me;
       },
       onSessionLost(f) { lostSubs.add(f); return () => lostSubs.delete(f); },
-      async logout() { me = null; people = []; cloudStore.stop(); try { await cloudStore.client().auth.signOut(); } catch (_) {} },
+      async logout() { try { await cloudStore.forgetDevice(); } catch (_) {} me = null; people = []; cloudStore.stop(); try { await cloudStore.client().auth.signOut(); } catch (_) {} },
     };
   })();
   // Authentication is Supabase Auth only. Without a Supabase configuration nobody can sign in.
@@ -1138,6 +1266,38 @@
   const authService = CLOUD ? cloudAuth : noAuth;
 
   // ---------- dashboardService ----------
+  // ---------- financeService: contract tracking (read-only, from existing quotation → invoice → payment links) ----------
+  // Contract balance = quotation total − all payments on the quotation. Invoice balance = invoice amount − payments on that invoice.
+  const financeService = {
+    S: { PAID: 'Fully Paid', DEP: 'Deposit Paid – Balance Invoice Required', BAL: 'Balance Due', UNPAID: 'Unpaid Invoice', NONE: 'No Invoice' },
+    isContract(q) { const st = quotationService.status(q); return st === quotationService.WAITING || st === quotationService.RECEIVED || invoiceService.forQuotation(q.id).length > 0 || quotationService.received(q.id) > EPS; },
+    contract(q) {
+      const S = this.S; const sm = quotationService.summary(q); const invs = invoiceService.forQuotation(q.id);
+      const rows = invs.map((i) => ({ inv: i, type: i.type || 'Full', amount: r2(num(i.amount)), paid: invoiceService.paid(i), balance: invoiceService.balanceDue(i), status: invoiceService.payStatus(i) }));
+      const unpaid = rows.filter((r) => r.status !== 'Paid'); const balInvs = rows.filter((r) => r.type === 'Balance');
+      let status;
+      if (sm.total > EPS && sm.remaining <= EPS) status = S.PAID;
+      else if (!invs.length) status = S.NONE;
+      else if (unpaid.length) status = S.UNPAID;
+      else if (rows.some((r) => r.type === 'Deposit') && !balInvs.length) status = S.DEP;
+      else status = S.BAL;
+      const balanceInvoice = (balInvs.find((r) => r.status !== 'Paid') || balInvs[balInvs.length - 1] || {}).inv || null;
+      return { q, total: sm.total, invoiced: sm.billed, paid: sm.received, balance: sm.remaining, status, invoices: rows, unpaidInvoice: (unpaid[0] || {}).inv || null,
+        balanceInvoice, canGenerateBalance: sm.remaining > EPS && !balInvs.length && !unpaid.length && !!invs.length && quotationService.status(q) !== 'Rejected' };
+    },
+    overview() {
+      const S = this.S; const list = repos.quotations.list().filter((q) => this.isContract(q)).map((q) => this.contract(q));
+      const order = [S.DEP, S.BAL, S.UNPAID, S.NONE, S.PAID];
+      list.sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status) || (b.q.date || '').localeCompare(a.q.date || ''));
+      const openInv = repos.invoices.list().filter((i) => invoiceService.payStatus(i) !== 'Paid');
+      const count = (st) => list.filter((c) => c.status === st).length;
+      return {
+        list, outstanding: r2(list.filter((c) => c.status !== S.PAID).reduce((t, c) => t + c.balance, 0)), openContracts: list.filter((c) => c.status !== S.PAID).length,
+        depositPaid: count(S.DEP), balanceDue: count(S.BAL), unpaid: count(S.UNPAID), fullyPaid: count(S.PAID), noInvoice: count(S.NONE),
+        unpaidInvoices: openInv.length, unpaidInvoiceAmount: r2(openInv.reduce((t, i) => t + invoiceService.balanceDue(i), 0)),
+      };
+    },
+  };
   const dashboardService = {
     summary() {
       const invs = repos.invoices.list(); const period = periodOf(todayISO());
@@ -1244,7 +1404,7 @@
   ZW.util = { uid, num, r2, todayISO, addDays, addPeriod, validDate, periodOf, fill };
   Object.assign(ZW, {
     AppError, storageService, repos, settingsService, brandService, numberingService, customerService, quotationService, invoiceService, paymentService,
-    receiptService, warrantyService, authService, creatorOf, dashboardService, imageService, demoService, fmt, calcTotals, resetAll, itemPoints, custName, autoCaption,
+    receiptService, warrantyService, authService, creatorOf, dashboardService, financeService, imageService, demoService, fmt, calcTotals, resetAll, itemPoints, custName, autoCaption,
   });
   // ---------- one-time settings import (old device IndexedDB → Supabase zw_kv 'settings') ----------
   // Reads the pre-Supabase IndexedDB copy read-only; never modifies or deletes it. Admin only.
